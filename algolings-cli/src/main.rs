@@ -84,6 +84,7 @@ fn run_module(
 ) -> notify::Result<()> {
     let mut state = MultiExerciseState::new(module.exercises);
     let hint_tracker_step = hint_tracker.clone();
+    let hint_tracker_ready = hint_tracker.clone();
 
     run_multi_exercise_loop(
         workspace_root,
@@ -93,7 +94,22 @@ fn run_module(
         DEBOUNCE_PERIOD,
         TEST_TIMEOUT,
         None,
-        |exercise| println!("watching {}", exercise.skeleton_path),
+        move |exercise| {
+            // Seed the hint tracker here too, not just on a failing live
+            // save (ExerciseFailed below) — this fires right after catch_up
+            // resolves the current exercise on startup/resume, and again
+            // whenever progress advances to a new exercise, both of which
+            // otherwise leave HintTracker's `current` at None until the
+            // learner's first save. Pressing [h] in that window hit the
+            // same `None` branch as genuinely-exhausted hints, so a
+            // freshly-arrived exercise misreported "no more hints" instead
+            // of offering its first one.
+            hint_tracker_ready
+                .lock()
+                .unwrap()
+                .set_current_exercise(exercise);
+            println!("watching {}", exercise.skeleton_path);
+        },
         || print!("{}", running_indicator()),
         move |step| match step {
             StepOutcome::ExerciseFailed { exercise, outcome } => {

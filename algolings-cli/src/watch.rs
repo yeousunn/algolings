@@ -103,7 +103,7 @@ pub fn run_multi_exercise_loop(
     quiet_period: Duration,
     test_timeout: Duration,
     max_iterations: Option<u32>,
-    mut on_current_exercise: impl FnMut(&crate::exercise::Exercise),
+    mut on_current_exercise: impl FnMut(&'static crate::exercise::Exercise),
     mut on_settled: impl FnMut(),
     mut on_step: impl FnMut(StepOutcome),
     mut on_all_complete: impl FnMut(),
@@ -329,6 +329,66 @@ mod tests {
 
         assert_eq!(*failed_names.lock().unwrap(), vec!["bubble_sort"]);
         assert_eq!(*ready_name.lock().unwrap(), Some("bubble_sort"));
+    }
+
+    #[test]
+    fn on_current_exercise_can_seed_a_hint_tracker_before_any_save() {
+        // Regression test for a real bug: HintTracker was only ever seeded
+        // from a failing live-save result (ExerciseFailed), never from
+        // on_current_exercise. That left a window — most visibly right
+        // after catch_up resolves the current exercise on a restart,
+        // before the learner has touched a file — where pressing [h] hit
+        // the same `None` branch as genuinely-exhausted hints, misreporting
+        // "no more hints" for an exercise the learner hadn't even seen a
+        // hint for yet. Wires a real HintTracker through on_current_exercise
+        // the same way main.rs does, and checks a hint is available the
+        // moment catch_up lands on a failing exercise — no save required.
+        let dir = tempfile::tempdir().unwrap();
+        let watched_file = dir.path().join("watched.rs");
+        std::fs::write(&watched_file, "initial").unwrap();
+
+        let mut state = MultiExerciseState::new(crate::exercise::SORT_EXERCISES);
+        let hint_tracker = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::hints::HintTracker::new(),
+        ));
+        let hint_tracker_ready = hint_tracker.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+
+        let handle = thread::spawn(move || {
+            run_multi_exercise_loop(
+                &workspace_root(),
+                dir.path(),
+                "exercises-sort",
+                &mut state,
+                Duration::from_millis(30),
+                A_GENEROUS_TIMEOUT,
+                Some(1),
+                move |exercise| {
+                    hint_tracker_ready
+                        .lock()
+                        .unwrap()
+                        .set_current_exercise(exercise);
+                    ready_tx.send(()).unwrap();
+                },
+                || {},
+                |_| {},
+                || panic!("should not complete while every exercise is unsolved"),
+            )
+            .unwrap();
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("on_current_exercise should fire once catch_up resolves the exercise");
+        assert_eq!(
+            hint_tracker.lock().unwrap().next_hint(),
+            Some(crate::exercise::SORT_EXERCISES[0].hints[0]),
+            "a hint should be available immediately after catch_up, with no save yet"
+        );
+
+        // Let the loop settle and finish so the spawned thread cleans up.
+        std::fs::write(&watched_file, "changed").unwrap();
+        handle.join().unwrap();
     }
 
     /// A standalone throwaway crate whose single test reads its pass/fail
